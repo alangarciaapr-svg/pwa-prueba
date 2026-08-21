@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v6';
+const CACHE_NAME = 'iaptidud-supervision-v7';
 const APP_SHELL = [
   './',
   './index.html',
@@ -37,9 +37,6 @@ async function addSupabaseSyncScript(response) {
     });
   }
 
-  // IMPORTANTE: usar el último </body> del documento real.
-  // El código del PDF contiene un </body> dentro de un template string JavaScript,
-  // por lo que reemplazar la primera coincidencia rompe el script principal.
   const bodyCloseIndex = text.lastIndexOf('</body>');
   const patched = bodyCloseIndex >= 0
     ? text.slice(0, bodyCloseIndex) + '<script src="./supabase-sync.js"></script>\n' + text.slice(bodyCloseIndex)

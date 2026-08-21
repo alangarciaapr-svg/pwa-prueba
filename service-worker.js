@@ -1,10 +1,11 @@
-const CACHE_NAME = 'iaptidud-supervision-v9';
+const CACHE_NAME = 'iaptidud-supervision-v10';
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './install-helper.js',
   './supabase-sync.js'
 ];
 
@@ -21,36 +22,41 @@ self.addEventListener('activate', event => {
     await Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)));
     await self.clients.claim();
 
-    // Fuerza una sola recarga al activar esta nueva versión para que la navegación
-    // quede controlada por el service worker y se cargue supabase-sync.js desde el inicio.
+    // Fuerza una sola recarga al activar esta versión para que la navegación
+    // quede controlada y el capturador de instalación se ejecute desde el <head>.
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     await Promise.all(windows.map(client => client.navigate(client.url).catch(() => null)));
   })());
 });
 
-async function addSupabaseSyncScript(response) {
+async function addAppScripts(response) {
   if (!response) return response;
 
-  const text = await response.text();
+  let text = await response.text();
+  const installScript = '<script src="./install-helper.js"></script>';
+  const syncScript = '<script src="./supabase-sync.js"></script>';
 
-  if (text.includes('<script src="./supabase-sync.js"></script>')) {
-    return new Response(text, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers
-    });
+  // La instalación debe capturarse temprano, antes de que termine de cargar la página.
+  if (!text.includes(installScript)) {
+    const headCloseIndex = text.lastIndexOf('</head>');
+    if (headCloseIndex >= 0) {
+      text = text.slice(0, headCloseIndex) + installScript + '\n' + text.slice(headCloseIndex);
+    }
   }
 
-  const bodyCloseIndex = text.lastIndexOf('</body>');
-  const patched = bodyCloseIndex >= 0
-    ? text.slice(0, bodyCloseIndex) + '<script src="./supabase-sync.js"></script>\n' + text.slice(bodyCloseIndex)
-    : text;
+  // La sincronización se mantiene al final del body para conservar la app existente.
+  if (!text.includes(syncScript)) {
+    const bodyCloseIndex = text.lastIndexOf('</body>');
+    if (bodyCloseIndex >= 0) {
+      text = text.slice(0, bodyCloseIndex) + syncScript + '\n' + text.slice(bodyCloseIndex);
+    }
+  }
 
   const headers = new Headers(response.headers);
   headers.set('Content-Type', 'text/html; charset=utf-8');
   headers.delete('Content-Length');
 
-  return new Response(patched, {
+  return new Response(text, {
     status: response.status,
     statusText: response.statusText,
     headers
@@ -64,13 +70,13 @@ self.addEventListener('fetch', event => {
     event.respondWith((async () => {
       try {
         const networkResponse = await fetch(event.request);
-        const patchedResponse = await addSupabaseSyncScript(networkResponse);
+        const patchedResponse = await addAppScripts(networkResponse);
         const copy = patchedResponse.clone();
         caches.open(CACHE_NAME).then(cache => cache.put('./index.html', copy));
         return patchedResponse;
       } catch (error) {
         const cached = await caches.match('./index.html');
-        return cached || Response.error();
+        return cached ? addAppScripts(cached) : Response.error();
       }
     })());
     return;

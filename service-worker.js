@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v11';
+const CACHE_NAME = 'iaptidud-supervision-v12';
 const APP_SHELL = [
   './',
   './index.html',
@@ -6,6 +6,7 @@ const APP_SHELL = [
   './icons/icon-192.png',
   './icons/icon-512.png',
   './install-helper.js',
+  './supabase-auth.js',
   './supabase-sync.js'
 ];
 
@@ -22,8 +23,8 @@ self.addEventListener('activate', event => {
     await Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)));
     await self.clients.claim();
 
-    // Fuerza una sola recarga al activar esta versión para que la navegación
-    // quede controlada y el capturador de instalación se ejecute desde el <head>.
+    // Fuerza una sola recarga al activar esta versión para que todos los dispositivos
+    // reciban la autenticación Supabase y la sincronización vinculada a user_id.
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     await Promise.all(windows.map(client => client.navigate(client.url).catch(() => null)));
   })());
@@ -44,7 +45,8 @@ async function addAppScripts(response) {
     }
   }
 
-  // La sincronización se mantiene al final del body para conservar la app existente.
+  // Auth se carga directamente desde index.html. La sincronización queda al final
+  // del body para que todas las funciones existentes ya estén disponibles.
   if (!text.includes(syncScript)) {
     const bodyCloseIndex = text.lastIndexOf('</body>');
     if (bodyCloseIndex >= 0) {

@@ -92,7 +92,22 @@
     }
 
     const rows=await response.json();
-    const remote=Array.isArray(rows)?rows.map(fromSupabaseRow):[];
+    const remoteRows=Array.isArray(rows)?rows:[];
+
+    // Los registros con deleted_at funcionan como marca de eliminación.
+    // Así una inspección eliminada no vuelve a aparecer desde otro dispositivo.
+    const deletedIds=new Set(
+      remoteRows.filter(row=>row.deleted_at).map(row=>String(row.id))
+    );
+
+    if(deletedIds.size){
+      data=data.filter(x=>!deletedIds.has(String(x.id)));
+    }
+
+    const remote=remoteRows
+      .filter(row=>!row.deleted_at)
+      .map(fromSupabaseRow);
+
     const localById=new Map(data.map(x=>[String(x.id),x]));
 
     remote.forEach(remoteInspection=>{
@@ -115,7 +130,7 @@
     if(active==='reports'&&typeof renderReports==='function') renderReports();
     if(active==='detail'&&typeof renderDetail==='function') renderDetail();
 
-    console.info('Supabase: inspecciones cargadas:',remote.length);
+    console.info('Supabase: inspecciones activas cargadas:',remote.length);
     return true;
   }
 
@@ -140,6 +155,109 @@
     if(typeof data==='undefined'||!Array.isArray(data)) return null;
     if(typeof currentId==='undefined'||currentId==null) return null;
     return data.find(x=>x.id===currentId)||null;
+  }
+
+  function isSuperuser(){
+    return typeof currentUser!=='undefined'
+      && currentUser
+      && currentUser.role==='Superusuario';
+  }
+
+  async function markInspectionDeleted(x){
+    if(!navigator.onLine) throw new Error('Sin conexión');
+    if(!x) throw new Error('Inspección no encontrada');
+
+    // Garantiza que exista en Supabase antes de marcarla como eliminada.
+    await syncInspection(x);
+
+    const stamp=new Date().toISOString();
+    const response=await fetch(
+      REST_URL+'/inspections?id=eq.'+encodeURIComponent(String(x.id)),
+      {
+        method:'PATCH',
+        headers:headers({
+          'Content-Type':'application/json',
+          'Prefer':'return=minimal'
+        }),
+        body:JSON.stringify({
+          deleted_at:stamp,
+          updated_at:stamp
+        }),
+        cache:'no-store'
+      }
+    );
+
+    if(!response.ok){
+      let detail='';
+      try{detail=await response.text()}catch(e){}
+      throw new Error('Supabase HTTP '+response.status+(detail?': '+detail:''));
+    }
+
+    return true;
+  }
+
+  window.deleteCurrentInspection=async function(){
+    if(!isSuperuser()){
+      if(typeof toast==='function') toast('Solo el Superusuario puede eliminar inspecciones');
+      return;
+    }
+
+    const inspection=currentInspection();
+    if(!inspection) return;
+
+    if(!navigator.onLine){
+      if(typeof toast==='function') toast('Necesitas conexión para eliminar una inspección');
+      return;
+    }
+
+    const ok=confirm(
+      '¿Eliminar esta inspección?\n\nSe quitará de todos los dispositivos y no volverá a aparecer.'
+    );
+    if(!ok) return;
+
+    try{
+      await markInspectionDeleted(inspection);
+
+      data=data.filter(x=>String(x.id)!==String(inspection.id));
+      if(typeof persist==='function') persist();
+
+      if(typeof currentId!=='undefined') currentId=null;
+      if(typeof renderHome==='function') renderHome();
+      if(typeof renderInspections==='function') renderInspections();
+      if(typeof renderReports==='function') renderReports();
+      if(typeof go==='function') go('inspections');
+      if(typeof toast==='function') toast('Inspección eliminada');
+
+      console.info('Inspección eliminada por Superusuario:',inspection.id);
+    }catch(error){
+      console.warn('No se pudo eliminar la inspección:',error);
+      if(typeof toast==='function') toast('No se pudo eliminar la inspección');
+    }
+  };
+
+  // Agrega el botón solo dentro del detalle y solo cuando la sesión es Superusuario.
+  const originalRenderDetail=window.renderDetail;
+  if(typeof originalRenderDetail==='function'){
+    window.renderDetail=function(){
+      const result=originalRenderDetail.apply(this,arguments);
+
+      if(isSuperuser()){
+        const inspection=currentInspection();
+        const host=document.getElementById('detailContent');
+
+        if(inspection&&host&&!host.querySelector('#superuserDeleteInspection')){
+          const button=document.createElement('button');
+          button.id='superuserDeleteInspection';
+          button.className='btn danger';
+          button.style.cssText='width:100%;margin-top:16px;margin-bottom:10px';
+          button.textContent='🗑 Eliminar inspección';
+          button.onclick=window.deleteCurrentInspection;
+          host.appendChild(button);
+        }
+      }
+
+      return result;
+    };
   }
 
   function wrapMutation(name){
@@ -196,9 +314,13 @@
   async function initialSync(){
     if(!navigator.onLine) return;
     try{
-      // Primero sube cualquier inspección real que exista solo en este equipo.
+      // Primero lee Supabase para respetar eliminaciones hechas en otros equipos.
+      await loadInspections();
+
+      // Luego sube cualquier inspección local real que aún no exista en la nube.
       await syncExistingLocalInspections();
-      // Después descarga la base compartida para mostrarla en este dispositivo.
+
+      // Última lectura para dejar todos los dispositivos con el mismo estado.
       await loadInspections();
     }catch(error){
       console.warn('Sincronización inicial con Supabase incompleta:',error);
@@ -213,6 +335,7 @@
     syncInspection,
     loadInspections,
     syncExistingLocalInspections,
+    deleteInspection:markInspectionDeleted,
     refresh:initialSync
   };
 })();

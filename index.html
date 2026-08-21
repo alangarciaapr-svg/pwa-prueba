@@ -958,7 +958,7 @@ function clearSign(){
  }
 }
 if(localStorage.getItem('iaptidud-dark')==='1'){document.body.classList.add('dark');document.getElementById('darkSwitch').classList.add('on')}
-try{currentUser=JSON.parse(localStorage.getItem('iaptidud-current-user')||'null')}catch(e){}
+currentUser=null;
 data.forEach(x=>{
  if(x.status==='completada'&&!hasCompletionRequirements(x)) x.status=x.incompleteStatusBeforeCompletion||'pendiente';
  else updateInspectionStatus(x);

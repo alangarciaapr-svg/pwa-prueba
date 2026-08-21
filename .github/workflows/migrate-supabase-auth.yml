@@ -1,0 +1,66 @@
+name: Migrate Supabase Auth
+
+on:
+  push:
+    paths:
+      - '.github/workflows/migrate-supabase-auth.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Patch index without changing design
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+
+          old_card='''          <div class="card" style="margin-top:16px;box-shadow:none">\n            <div class="small"><b>Usuarios de prueba</b></div>\n            <div class="small" style="margin-top:8px">Superusuario: alan@alan.cl / 1111</div>\n            <div class="small">Administrador: admin@admin.cl / 1234</div>\n            <div class="small">Invitado: invitado@invitado / 0000</div>\n          </div>'''
+          new_card='''          <div class="card" style="margin-top:16px;box-shadow:none">\n            <div class="small"><b>Acceso seguro</b></div>\n            <div class="small" style="margin-top:8px">Ingresa con tu cuenta registrada en Supabase.</div>\n          </div>'''
+          if old_card not in s:
+              raise SystemExit('No se encontró tarjeta demo esperada')
+          s=s.replace(old_card,new_card,1)
+
+          pattern=r"let currentUser=null;\nconst users=\[[\s\S]*?\nfunction go\(id\)\{"
+          replacement='''let currentUser=null;\nfunction login(){\n if(window.IAPTIDUD_AUTH?.loginFromForm) return window.IAPTIDUD_AUTH.loginFromForm();\n toast('Inicializando autenticación...');\n}\nfunction go(id){'''
+          s,n=re.subn(pattern,replacement,s,count=1)
+          if n!=1:
+              raise SystemExit(f'Bloque demo reemplazado {n} veces')
+
+          old_restore="try{currentUser=JSON.parse(localStorage.getItem('iaptidud-current-user')||'null')}catch(e){}"
+          if old_restore not in s:
+              raise SystemExit('No se encontró restauración demo')
+          s=s.replace(old_restore,'currentUser=null;',1)
+
+          old_reset='''      <button class="btn danger" style="width:100%" onclick="resetData()">🗑 Borrar todos los datos</button>'''
+          new_reset='''      <button class="btn danger" style="width:100%" onclick="resetData()">🗑 Borrar todos los datos</button>\n      <button class="btn secondary" style="width:100%;margin-top:10px" onclick="logout()">↩ Cerrar sesión</button>'''
+          if old_reset not in s:
+              raise SystemExit('No se encontró botón de datos')
+          s=s.replace(old_reset,new_reset,1)
+
+          marker="</script>\n\n<script>\nif ('serviceWorker' in navigator) {"
+          auth="</script>\n\n<script src=\"./supabase-auth.js\"></script>\n\n<script>\nif ('serviceWorker' in navigator) {"
+          if '<script src="./supabase-auth.js"></script>' not in s:
+              if marker not in s:
+                  raise SystemExit('No se encontró punto de inserción de Auth')
+              s=s.replace(marker,auth,1)
+
+          p.write_text(s,encoding='utf-8')
+          PY
+      - name: Commit patched index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git diff --cached --quiet && exit 0
+          git commit -m "Reemplazar login demo por Supabase Auth"
+          git push origin main

@@ -140,10 +140,8 @@ body.dark .install{background:#2A1114;border-color:#5A2026}
           <div class="field"><label>Contraseña</label><input id="loginPass" value="" type="password" autocomplete="new-password"></div>
           <button class="btn primary" style="width:100%" onclick="login()">Ingresar</button>
           <div class="card" style="margin-top:16px;box-shadow:none">
-            <div class="small"><b>Usuarios de prueba</b></div>
-            <div class="small" style="margin-top:8px">Superusuario: alan@alan.cl / 1111</div>
-            <div class="small">Administrador: admin@admin.cl / 1234</div>
-            <div class="small">Invitado: invitado@invitado / 0000</div>
+            <div class="small"><b>Acceso seguro</b></div>
+            <div class="small" style="margin-top:8px">Ingresa con tu cuenta registrada en Supabase.</div>
           </div>
         </div>
       </div>
@@ -232,6 +230,7 @@ body.dark .install{background:#2A1114;border-color:#5A2026}
         <div class="setting"><div><b>Estado de conexión</b><div class="small" id="connectionText">En línea</div></div><span>🌐</span></div>
       </div>
       <button class="btn danger" style="width:100%" onclick="resetData()">🗑 Borrar todos los datos</button>
+      <button class="btn secondary" style="width:100%;margin-top:10px" onclick="logout()">↩ Cerrar sesión</button>
     </section>
   </main>
 
@@ -318,28 +317,9 @@ function statusLabel(s){return s==='completada'?'Completada':s==='vencida'?'Venc
 function statusClass(s){return s==='completada'?'ok':s==='vencida'?'overdue':'pending'}
 
 let currentUser=null;
-const users=[
- {email:'alan@alan.cl',password:'1111',name:'Alan',role:'Superusuario'},
- {email:'admin@admin.cl',password:'1234',name:'Administrador',role:'Administrador'},
- {email:'invitado@invitado',password:'0000',name:'Invitado',role:'Invitado'}
-];
-
 function login(){
- const emailInput=document.getElementById('loginEmail');
- const passInput=document.getElementById('loginPass');
- const e=emailInput.value.trim().toLowerCase(),p=passInput.value;
- // Limpiar inmediatamente los datos ingresados para que no queden visibles en el login.
- emailInput.value='';
- passInput.value='';
- const found=users.find(u=>u.email===e&&u.password===p);
- if(found){
-   currentUser=found;
-   localStorage.setItem('iaptidud-current-user',JSON.stringify(found));
-   document.getElementById('bottomnav').classList.remove('hidden');
-   document.getElementById('fab').classList.remove('hidden');
-   updateUserUI();
-   go('home'); toast(`Sesión iniciada: ${found.role}`);
- } else toast('Credenciales incorrectas');
+ if(window.IAPTIDUD_AUTH?.loginFromForm) return window.IAPTIDUD_AUTH.loginFromForm();
+ toast('Inicializando autenticación...');
 }
 function go(id){
  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
@@ -356,7 +336,7 @@ function go(id){
 }
 function updateUserUI(){
  if(!currentUser){
-   try{currentUser=JSON.parse(localStorage.getItem('iaptidud-current-user')||'null')}catch(e){}
+   currentUser=null;
  }
  const u=currentUser||{name:'Supervisor',role:'Usuario',email:''};
  const homeName=document.getElementById('homeUserName');
@@ -989,6 +969,8 @@ persist();
 testSupabaseConnection();
 window.addEventListener('online',()=>testSupabaseConnection());
 </script>
+
+<script src="./supabase-auth.js"></script>
 
 <script>
 if ('serviceWorker' in navigator) {

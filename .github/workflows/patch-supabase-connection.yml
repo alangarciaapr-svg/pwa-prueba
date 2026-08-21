@@ -1,0 +1,111 @@
+name: Patch Supabase connection
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-supabase:
+    if: ${{ !contains(github.event.head_commit.message || '', '[supabase-connect]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Conectar PWA a Supabase
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('index.html')
+          s = p.read_text(encoding='utf-8')
+
+          block = """const SUPABASE_URL='https://xjzftawmfnlwkwslmpzo.supabase.co';
+          const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhqemZ0YXdtZm5sd2t3c2xtcHpvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyNzI4NzIsImV4cCI6MjEwMjg0ODg3Mn0.LzsJcd-zhiZRsKHb2xxQNWzIYmvZT0GMBSCshF8mCSs';
+          const SUPABASE_REST_URL=`${SUPABASE_URL}/rest/v1`;
+
+          async function supabaseRequest(path='',options={}){
+           const headers=new Headers(options.headers||{});
+           headers.set('apikey',SUPABASE_ANON_KEY);
+           headers.set('Authorization',`Bearer ${SUPABASE_ANON_KEY}`);
+           if(!headers.has('Accept')) headers.set('Accept','application/json');
+           const cleanPath=String(path||'').replace(/^\\/+/, '');
+           const url=cleanPath?`${SUPABASE_REST_URL}/${cleanPath}`:`${SUPABASE_REST_URL}/`;
+           return fetch(url,{...options,headers,cache:'no-store'});
+          }
+
+          let supabaseConnection={checked:false,connected:false,lastError:null};
+
+          async function testSupabaseConnection(){
+           if(!navigator.onLine){
+             supabaseConnection={checked:true,connected:false,lastError:'offline'};
+             return false;
+           }
+           try{
+             const response=await supabaseRequest('',{method:'GET',headers:{Accept:'application/openapi+json'}});
+             supabaseConnection={checked:true,connected:response.ok,lastError:response.ok?null:`HTTP ${response.status}`};
+             if(response.ok) console.info('Supabase conectado correctamente');
+             else console.warn('Supabase respondió con estado:',response.status);
+             return response.ok;
+           }catch(error){
+             supabaseConnection={checked:true,connected:false,lastError:error?.message||String(error)};
+             console.warn('No se pudo comprobar la conexión con Supabase:',error);
+             return false;
+           }
+          }
+
+          window.IAPTIDUD_SUPABASE={
+           url:SUPABASE_URL,
+           restUrl:SUPABASE_REST_URL,
+           request:supabaseRequest,
+           testConnection:testSupabaseConnection,
+           get status(){return {...supabaseConnection}}
+          };
+
+          """
+
+          anchor = "const STORAGE_KEY='iaptidud-demo-v1';"
+          if 'const SUPABASE_URL=' not in s:
+              if anchor not in s:
+                  raise SystemExit('No se encontró el punto de inserción de Supabase.')
+              s = s.replace(anchor, block + anchor, 1)
+
+          tail_old = """updateUserUI();
+          updateOnline();
+          persist();
+          </script>"""
+          tail_new = """updateUserUI();
+          updateOnline();
+          persist();
+          testSupabaseConnection();
+          window.addEventListener('online',()=>testSupabaseConnection());
+          </script>"""
+          if 'testSupabaseConnection();\nwindow.addEventListener' not in s:
+              if tail_old not in s:
+                  raise SystemExit('No se encontró el cierre esperado del script principal.')
+              s = s.replace(tail_old, tail_new, 1)
+
+          p.write_text(s, encoding='utf-8')
+
+          sw = Path('service-worker.js')
+          if sw.exists():
+              sws = sw.read_text(encoding='utf-8')
+              sws = sws.replace("iaptidud-supervision-v3", "iaptidud-supervision-v4")
+              sw.write_text(sws, encoding='utf-8')
+
+      - name: Guardar conexión
+        shell: bash
+        run: |
+          git config user.name "ChatGPT GitHub Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add index.html service-worker.js
+          if git diff --cached --quiet; then
+            echo "No hay cambios que guardar"
+            exit 0
+          fi
+          git commit -m "[supabase-connect] Conectar PWA a Supabase"
+          git push

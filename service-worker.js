@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v8';
+const CACHE_NAME = 'iaptidud-supervision-v9';
 const APP_SHELL = [
   './',
   './index.html',

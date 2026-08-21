@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v7';
+const CACHE_NAME = 'iaptidud-supervision-v8';
 const APP_SHELL = [
   './',
   './index.html',
@@ -16,12 +16,16 @@ self.addEventListener('install', event => {
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)))
-    )
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)));
+    await self.clients.claim();
+
+    // Fuerza una sola recarga al activar esta nueva versión para que la navegación
+    // quede controlada por el service worker y se cargue supabase-sync.js desde el inicio.
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    await Promise.all(windows.map(client => client.navigate(client.url).catch(() => null)));
+  })());
 });
 
 async function addSupabaseSyncScript(response) {

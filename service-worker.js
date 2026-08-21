@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v5';
+const CACHE_NAME = 'iaptidud-supervision-v6';
 const APP_SHELL = [
   './',
   './index.html',
@@ -26,13 +26,29 @@ self.addEventListener('activate', event => {
 
 async function addSupabaseSyncScript(response) {
   if (!response) return response;
+
   const text = await response.text();
-  const patched = text.includes('supabase-sync.js')
-    ? text
-    : text.replace('</body>', '<script src="./supabase-sync.js"></script>\n</body>');
+
+  if (text.includes('<script src="./supabase-sync.js"></script>')) {
+    return new Response(text, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers
+    });
+  }
+
+  // IMPORTANTE: usar el último </body> del documento real.
+  // El código del PDF contiene un </body> dentro de un template string JavaScript,
+  // por lo que reemplazar la primera coincidencia rompe el script principal.
+  const bodyCloseIndex = text.lastIndexOf('</body>');
+  const patched = bodyCloseIndex >= 0
+    ? text.slice(0, bodyCloseIndex) + '<script src="./supabase-sync.js"></script>\n' + text.slice(bodyCloseIndex)
+    : text;
+
   const headers = new Headers(response.headers);
   headers.set('Content-Type', 'text/html; charset=utf-8');
   headers.delete('Content-Length');
+
   return new Response(patched, {
     status: response.status,
     statusText: response.statusText,

@@ -1,24 +1,33 @@
-// Sincronización Supabase entre dispositivos.
-// Mantiene el funcionamiento local/offline existente y agrega nube compartida.
+// Sincronización Supabase autenticada entre dispositivos.
+// Conserva el funcionamiento local/offline y aplica RLS por usuario autenticado.
 (function(){
   'use strict';
 
-  const SUPABASE_URL='https://xjzftawmfnlwkwslmpzo.supabase.co';
-  const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhqemZ0YXdtZm5sd2t3c2xtcHpvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyNzI4NzIsImV4cCI6MjEwMjg0ODg3Mn0.LzsJcd-zhiZRsKHb2xxQNWzIYmvZT0GMBSCshF8mCSs';
   const REST_URL=SUPABASE_URL+'/rest/v1';
 
-  function headers(extra={}){
+  async function headers(extra={}){
+    const token=await window.IAPTIDUD_AUTH?.getAccessToken?.();
+    if(!token) throw new Error('Sesión no autenticada');
     return {
       'apikey':SUPABASE_ANON_KEY,
-      'Authorization':'Bearer '+SUPABASE_ANON_KEY,
+      'Authorization':'Bearer '+token,
       'Accept':'application/json',
       ...extra
     };
   }
 
+  function authenticatedUserId(){
+    return window.IAPTIDUD_AUTH?.getUserId?.()||currentUser?.id||null;
+  }
+
   function toSupabaseRow(x){
+    const owner=(x&&Object.prototype.hasOwnProperty.call(x,'user_id'))
+      ? x.user_id
+      : authenticatedUserId();
+
     return {
       id:x.id,
+      user_id:owner,
       type:x.type,
       company:x.company,
       site:x.site,
@@ -38,6 +47,7 @@
   function fromSupabaseRow(row){
     return {
       id:Number(row.id),
+      user_id:row.user_id||null,
       type:row.type||'Seguridad',
       company:row.company||'',
       site:row.site||'',
@@ -55,10 +65,14 @@
 
   async function syncInspection(x){
     if(!navigator.onLine||!x) return false;
+    const uid=authenticatedUserId();
+    if(!uid) return false;
+
+    if(!Object.prototype.hasOwnProperty.call(x,'user_id')) x.user_id=uid;
 
     const response=await fetch(REST_URL+'/inspections?on_conflict=id',{
       method:'POST',
-      headers:headers({
+      headers:await headers({
         'Content-Type':'application/json',
         'Prefer':'resolution=merge-duplicates,return=representation'
       }),
@@ -77,11 +91,12 @@
 
   async function loadInspections(){
     if(!navigator.onLine) return false;
+    if(!authenticatedUserId()) return false;
     if(typeof data==='undefined'||!Array.isArray(data)) return false;
 
     const response=await fetch(REST_URL+'/inspections?select=*&order=updated_at.desc',{
       method:'GET',
-      headers:headers(),
+      headers:await headers(),
       cache:'no-store'
     });
 
@@ -94,12 +109,9 @@
     const rows=await response.json();
     const remoteRows=Array.isArray(rows)?rows:[];
 
-    // Los registros con deleted_at funcionan como marca de eliminación.
-    // Así una inspección eliminada no vuelve a aparecer desde otro dispositivo.
     const deletedIds=new Set(
       remoteRows.filter(row=>row.deleted_at).map(row=>String(row.id))
     );
-
     if(deletedIds.size){
       data=data.filter(x=>!deletedIds.has(String(x.id)));
     }
@@ -108,8 +120,19 @@
       .filter(row=>!row.deleted_at)
       .map(fromSupabaseRow);
 
-    const localById=new Map(data.map(x=>[String(x.id),x]));
+    const remoteIds=new Set(remote.map(x=>String(x.id)));
+    const uid=authenticatedUserId();
 
+    // Para usuarios normales, el historial local se mantiene limitado a sus registros.
+    // El Superusuario puede recibir registros de otros usuarios por RLS; esos registros
+    // conservan su user_id y nunca son reasignados al sincronizar.
+    data=data.filter(x=>{
+      if(Number(x.id)<=3) return false;
+      if(x.user_id&&x.user_id!==uid&&currentUser?.role!=='Superusuario') return false;
+      return true;
+    });
+
+    const localById=new Map(data.map(x=>[String(x.id),x]));
     remote.forEach(remoteInspection=>{
       const key=String(remoteInspection.id);
       const local=localById.get(key);
@@ -130,24 +153,30 @@
     if(active==='reports'&&typeof renderReports==='function') renderReports();
     if(active==='detail'&&typeof renderDetail==='function') renderDetail();
 
-    console.info('Supabase: inspecciones activas cargadas:',remote.length);
+    console.info('Supabase Auth: historial cargado:',remote.length,'user_id:',uid);
     return true;
   }
 
-  // Recupera inspecciones creadas previamente en este dispositivo que aún
-  // solo estén en localStorage. Se omiten los 3 registros demo originales.
   async function syncExistingLocalInspections(){
     if(!navigator.onLine) return false;
+    const uid=authenticatedUserId();
+    if(!uid) return false;
     if(typeof data==='undefined'||!Array.isArray(data)) return false;
 
-    const candidates=data.filter(x=>Number(x.id)>3);
+    const candidates=data.filter(x=>
+      Number(x.id)>3 &&
+      (!x.user_id || x.user_id===uid)
+    );
+
     for(const inspection of candidates){
+      if(!inspection.user_id) inspection.user_id=uid;
       try{
         await syncInspection(inspection);
       }catch(error){
         console.warn('No se pudo subir inspección local pendiente:',inspection?.id,error);
       }
     }
+    if(typeof persist==='function') persist();
     return true;
   }
 
@@ -166,8 +195,9 @@
   async function markInspectionDeleted(x){
     if(!navigator.onLine) throw new Error('Sin conexión');
     if(!x) throw new Error('Inspección no encontrada');
+    if(!authenticatedUserId()) throw new Error('Sesión no autenticada');
 
-    // Garantiza que exista en Supabase antes de marcarla como eliminada.
+    if(!x.user_id) x.user_id=authenticatedUserId();
     await syncInspection(x);
 
     const stamp=new Date().toISOString();
@@ -175,14 +205,11 @@
       REST_URL+'/inspections?id=eq.'+encodeURIComponent(String(x.id)),
       {
         method:'PATCH',
-        headers:headers({
+        headers:await headers({
           'Content-Type':'application/json',
           'Prefer':'return=minimal'
         }),
-        body:JSON.stringify({
-          deleted_at:stamp,
-          updated_at:stamp
-        }),
+        body:JSON.stringify({deleted_at:stamp,updated_at:stamp}),
         cache:'no-store'
       }
     );
@@ -192,7 +219,6 @@
       try{detail=await response.text()}catch(e){}
       throw new Error('Supabase HTTP '+response.status+(detail?': '+detail:''));
     }
-
     return true;
   }
 
@@ -204,47 +230,37 @@
 
     const inspection=currentInspection();
     if(!inspection) return;
-
     if(!navigator.onLine){
       if(typeof toast==='function') toast('Necesitas conexión para eliminar una inspección');
       return;
     }
 
-    const ok=confirm(
-      '¿Eliminar esta inspección?\n\nSe quitará de todos los dispositivos y no volverá a aparecer.'
-    );
+    const ok=confirm('¿Eliminar esta inspección?\n\nSe quitará de todos los dispositivos y no volverá a aparecer.');
     if(!ok) return;
 
     try{
       await markInspectionDeleted(inspection);
-
       data=data.filter(x=>String(x.id)!==String(inspection.id));
       if(typeof persist==='function') persist();
-
       if(typeof currentId!=='undefined') currentId=null;
       if(typeof renderHome==='function') renderHome();
       if(typeof renderInspections==='function') renderInspections();
       if(typeof renderReports==='function') renderReports();
       if(typeof go==='function') go('inspections');
       if(typeof toast==='function') toast('Inspección eliminada');
-
-      console.info('Inspección eliminada por Superusuario:',inspection.id);
     }catch(error){
       console.warn('No se pudo eliminar la inspección:',error);
       if(typeof toast==='function') toast('No se pudo eliminar la inspección');
     }
   };
 
-  // Agrega el botón solo dentro del detalle y solo cuando la sesión es Superusuario.
   const originalRenderDetail=window.renderDetail;
   if(typeof originalRenderDetail==='function'){
     window.renderDetail=function(){
       const result=originalRenderDetail.apply(this,arguments);
-
       if(isSuperuser()){
         const inspection=currentInspection();
         const host=document.getElementById('detailContent');
-
         if(inspection&&host&&!host.querySelector('#superuserDeleteInspection')){
           const button=document.createElement('button');
           button.id='superuserDeleteInspection';
@@ -255,7 +271,6 @@
           host.appendChild(button);
         }
       }
-
       return result;
     };
   }
@@ -263,12 +278,11 @@
   function wrapMutation(name){
     const original=window[name];
     if(typeof original!=='function') return;
-
     window[name]=function(){
       const result=original.apply(this,arguments);
       Promise.resolve(result).then(async()=>{
         const inspection=currentInspection();
-        if(!inspection||!navigator.onLine) return;
+        if(!inspection||!navigator.onLine||!authenticatedUserId()) return;
         try{
           await syncInspection(inspection);
         }catch(error){
@@ -282,6 +296,10 @@
   const originalSaveInspection=window.saveInspection;
   if(typeof originalSaveInspection==='function'){
     window.saveInspection=function(){
+      if(!authenticatedUserId()){
+        if(typeof toast==='function') toast('Debes iniciar sesión');
+        return;
+      }
       const idsBefore=new Set((typeof data!=='undefined'&&Array.isArray(data))?data.map(x=>x.id):[]);
       const result=originalSaveInspection.apply(this,arguments);
 
@@ -289,6 +307,8 @@
         if(typeof data==='undefined'||!Array.isArray(data)) return;
         const created=data.find(x=>!idsBefore.has(x.id));
         if(!created) return;
+        if(!created.user_id) created.user_id=authenticatedUserId();
+        if(typeof persist==='function') persist();
 
         if(!navigator.onLine){
           if(typeof toast==='function') toast('Inspección guardada localmente. Se sincronizará al volver Internet');
@@ -298,13 +318,12 @@
         try{
           await syncInspection(created);
           if(typeof toast==='function') toast('Inspección guardada en Supabase');
-          console.info('Inspección sincronizada con Supabase:',created.id);
+          console.info('Inspección sincronizada:',created.id,'user_id:',created.user_id);
         }catch(error){
           console.warn('No se pudo sincronizar la inspección con Supabase:',error);
           if(typeof toast==='function') toast('Inspección guardada localmente; sincronización pendiente');
         }
       });
-
       return result;
     };
   }
@@ -312,23 +331,23 @@
   ['toggleItem','saveFinding','saveEvidence','saveSign','clearSign'].forEach(wrapMutation);
 
   async function initialSync(){
-    if(!navigator.onLine) return;
+    await window.IAPTIDUD_AUTH?.ready?.();
+    if(!navigator.onLine||!authenticatedUserId()) return false;
     try{
-      // Primero lee Supabase para respetar eliminaciones hechas en otros equipos.
       await loadInspections();
-
-      // Luego sube cualquier inspección local real que aún no exista en la nube.
       await syncExistingLocalInspections();
-
-      // Última lectura para dejar todos los dispositivos con el mismo estado.
       await loadInspections();
+      return true;
     }catch(error){
-      console.warn('Sincronización inicial con Supabase incompleta:',error);
+      console.warn('Sincronización autenticada incompleta:',error);
+      return false;
     }
   }
 
   window.addEventListener('online',initialSync);
-  initialSync();
+  window.addEventListener('iaptidud-auth-changed',event=>{
+    if(event.detail?.authenticated) initialSync();
+  });
 
   window.IAPTIDUD_SUPABASE_SYNC={
     url:SUPABASE_URL,
@@ -338,4 +357,6 @@
     deleteInspection:markInspectionDeleted,
     refresh:initialSync
   };
+
+  initialSync();
 })();

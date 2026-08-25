@@ -68,17 +68,42 @@
     const uid=authenticatedUserId();
     if(!uid) return false;
 
-    if(!Object.prototype.hasOwnProperty.call(x,'user_id')) x.user_id=uid;
+    const hasOwner=Object.prototype.hasOwnProperty.call(x,'user_id');
+    const isLegacy=hasOwner && x.user_id==null;
+    if(!hasOwner) x.user_id=uid;
 
-    const response=await fetch(REST_URL+'/inspections?on_conflict=id',{
-      method:'POST',
-      headers:await headers({
-        'Content-Type':'application/json',
-        'Prefer':'resolution=merge-duplicates,return=representation'
-      }),
-      body:JSON.stringify(toSupabaseRow(x)),
-      cache:'no-store'
-    });
+    let response;
+
+    // Los registros anteriores a Supabase Auth conservan user_id = NULL.
+    // El Superusuario puede actualizarlos sin convertirlos en registros propios.
+    if(isLegacy && currentUser?.role==='Superusuario'){
+      const patch=toSupabaseRow(x);
+      delete patch.id;
+      delete patch.user_id;
+
+      response=await fetch(
+        REST_URL+'/inspections?id=eq.'+encodeURIComponent(String(x.id)),
+        {
+          method:'PATCH',
+          headers:await headers({
+            'Content-Type':'application/json',
+            'Prefer':'return=representation'
+          }),
+          body:JSON.stringify(patch),
+          cache:'no-store'
+        }
+      );
+    }else{
+      response=await fetch(REST_URL+'/inspections?on_conflict=id',{
+        method:'POST',
+        headers:await headers({
+          'Content-Type':'application/json',
+          'Prefer':'resolution=merge-duplicates,return=representation'
+        }),
+        body:JSON.stringify(toSupabaseRow(x)),
+        cache:'no-store'
+      });
+    }
 
     if(!response.ok){
       let detail='';
@@ -120,7 +145,6 @@
       .filter(row=>!row.deleted_at)
       .map(fromSupabaseRow);
 
-    const remoteIds=new Set(remote.map(x=>String(x.id)));
     const uid=authenticatedUserId();
 
     // Para usuarios normales, el historial local se mantiene limitado a sus registros.
@@ -163,13 +187,14 @@
     if(!uid) return false;
     if(typeof data==='undefined'||!Array.isArray(data)) return false;
 
+    // Desde Supabase Auth, toda inspección nueva recibe user_id al crearse,
+    // por lo que nunca reclamamos automáticamente registros históricos sin dueño.
     const candidates=data.filter(x=>
       Number(x.id)>3 &&
-      (!x.user_id || x.user_id===uid)
+      x.user_id===uid
     );
 
     for(const inspection of candidates){
-      if(!inspection.user_id) inspection.user_id=uid;
       try{
         await syncInspection(inspection);
       }catch(error){
@@ -197,7 +222,6 @@
     if(!x) throw new Error('Inspección no encontrada');
     if(!authenticatedUserId()) throw new Error('Sesión no autenticada');
 
-    if(!x.user_id) x.user_id=authenticatedUserId();
     await syncInspection(x);
 
     const stamp=new Date().toISOString();

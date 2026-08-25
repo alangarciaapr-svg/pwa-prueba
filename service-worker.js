@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v14';
+const CACHE_NAME = 'iaptidud-supervision-v15';
 const APP_SHELL = [
   './',
   './index.html',
@@ -7,7 +7,8 @@ const APP_SHELL = [
   './icons/icon-512.png',
   './install-helper.js',
   './supabase-auth.js',
-  './supabase-sync.js'
+  './supabase-sync.js',
+  './audit-log.js'
 ];
 
 self.addEventListener('install', event => {
@@ -23,8 +24,8 @@ self.addEventListener('activate', event => {
     await Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)));
     await self.clients.claim();
 
-    // Fuerza una sola recarga al activar esta versión para que todos los dispositivos
-    // reciban la autenticación Supabase y la sincronización vinculada a user_id.
+    // Fuerza una recarga al activar esta versión para incorporar Auth,
+    // sincronización y trazabilidad en todos los dispositivos.
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     await Promise.all(windows.map(client => client.navigate(client.url).catch(() => null)));
   })());
@@ -36,6 +37,7 @@ async function addAppScripts(response) {
   let text = await response.text();
   const installScript = '<script src="./install-helper.js"></script>';
   const syncScript = '<script src="./supabase-sync.js"></script>';
+  const auditScript = '<script src="./audit-log.js"></script>';
 
   // La instalación debe capturarse temprano, antes de que termine de cargar la página.
   if (!text.includes(installScript)) {
@@ -45,12 +47,15 @@ async function addAppScripts(response) {
     }
   }
 
-  // Auth se carga directamente desde index.html. La sincronización queda al final
-  // del body para que todas las funciones existentes ya estén disponibles.
-  if (!text.includes(syncScript)) {
-    const bodyCloseIndex = text.lastIndexOf('</body>');
-    if (bodyCloseIndex >= 0) {
-      text = text.slice(0, bodyCloseIndex) + syncScript + '\n' + text.slice(bodyCloseIndex);
+  // Auth se carga directamente desde index.html. Sincronización y trazabilidad
+  // se agregan al final del body, en ese orden, para envolver las funciones finales.
+  const bodyCloseIndex = text.lastIndexOf('</body>');
+  if (bodyCloseIndex >= 0) {
+    let scripts='';
+    if (!text.includes(syncScript)) scripts += syncScript + '\n';
+    if (!text.includes(auditScript)) scripts += auditScript + '\n';
+    if (scripts) {
+      text = text.slice(0, bodyCloseIndex) + scripts + text.slice(bodyCloseIndex);
     }
   }
 

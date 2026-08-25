@@ -6,6 +6,11 @@
   const QUEUE_KEY='iaptidud-audit-queue-v1';
   let auditRows=[];
   let wrappersInstalled=false;
+  let appOpenLogged=false;
+
+  function getCurrentUser(){
+    try{return typeof currentUser!=='undefined'?currentUser:null}catch(e){return null}
+  }
 
   function escapeHtml(value){
     if(typeof window.esc==='function') return window.esc(value);
@@ -118,16 +123,18 @@
     wrappersInstalled=true;
 
     wrapFunction('login',async({result})=>{
-      if(result===true&&window.currentUser?.id){
-        await logActivity('login','session',null,'Inició sesión en la aplicación',{role:currentUser.role||''});
+      const user=getCurrentUser();
+      if(result===true&&user?.id){
+        await logActivity('login','session',null,'Inició sesión en la aplicación',{role:user.role||''});
       }
     });
 
     const originalLogout=window.logout;
     if(typeof originalLogout==='function'&&!originalLogout.__auditWrapped){
       const wrappedLogout=async function(){
-        if(window.currentUser?.id){
-          await logActivity('logout','session',null,'Cerró sesión en la aplicación',{role:currentUser.role||''});
+        const user=getCurrentUser();
+        if(user?.id){
+          await logActivity('logout','session',null,'Cerró sesión en la aplicación',{role:user.role||''});
           await flushQueue();
         }
         return await originalLogout.apply(this,arguments);
@@ -262,7 +269,8 @@
   }
 
   async function openTraceability(){
-    if(window.currentUser?.role!=='Superusuario'){
+    const user=getCurrentUser();
+    if(user?.role!=='Superusuario'){
       if(typeof toast==='function') toast('Solo el Superusuario puede ver la trazabilidad');
       return;
     }
@@ -295,7 +303,8 @@
     const profile=document.getElementById('profile');
     if(!profile) return;
     let button=document.getElementById('auditTraceButton');
-    if(window.currentUser?.role!=='Superusuario'){
+    const user=getCurrentUser();
+    if(user?.role!=='Superusuario'){
       button?.remove();
       return;
     }
@@ -307,6 +316,15 @@
     button.textContent='🕘 Trazabilidad';
     button.onclick=openTraceability;
     profile.appendChild(button);
+  }
+
+  async function logAppOpenedOnce(){
+    if(appOpenLogged||!window.IAPTIDUD_AUTH?.isAuthenticated?.()) return;
+    const user=getCurrentUser();
+    if(!user?.id) return;
+    appOpenLogged=true;
+    await flushQueue();
+    await logActivity('app_opened','session',null,'Abrió la aplicación',{role:user.role||''});
   }
 
   const originalGo=window.go;
@@ -334,20 +352,18 @@
   window.addEventListener('online',flushQueue);
   window.addEventListener('iaptidud-auth-changed',event=>{
     if(event.detail?.authenticated){
+      appOpenLogged=false;
       setTimeout(()=>{installWrappers();installTraceButton();flushQueue()},0);
     }else{
+      appOpenLogged=false;
       document.getElementById('auditTraceButton')?.remove();
     }
   });
 
   window.addEventListener('iaptidud-auth-ready',event=>{
-    if(event.detail?.authenticated){
-      setTimeout(async()=>{
-        installWrappers();
-        installTraceButton();
-        await flushQueue();
-        await logActivity('app_opened','session',null,'Abrió la aplicación',{role:window.currentUser?.role||''});
-      },0);
-    }
+    if(event.detail?.authenticated) setTimeout(logAppOpenedOnce,0);
   });
+
+  // Cubre el caso en que Auth terminó de restaurar la sesión antes de cargar este archivo.
+  window.IAPTIDUD_AUTH?.ready?.().then(()=>setTimeout(logAppOpenedOnce,0)).catch(()=>{});
 })();

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v17';
+const CACHE_NAME = 'iaptidud-supervision-v18';
 const APP_SHELL = [
   './',
   './index.html',
@@ -8,7 +8,8 @@ const APP_SHELL = [
   './install-helper.js',
   './supabase-auth.js',
   './supabase-sync.js',
-  './audit-log.js'
+  './audit-log.js',
+  './reports-dashboard.js'
 ];
 
 self.addEventListener('install', event => {
@@ -25,7 +26,7 @@ self.addEventListener('activate', event => {
     await self.clients.claim();
 
     // Fuerza una recarga al activar esta versión para incorporar Auth,
-    // sincronización y trazabilidad en todos los dispositivos.
+    // sincronización, trazabilidad y reportes actualizados en todos los dispositivos.
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     await Promise.all(windows.map(client => client.navigate(client.url).catch(() => null)));
   })());
@@ -38,6 +39,7 @@ async function addAppScripts(response) {
   const installScript = '<script src="./install-helper.js"></script>';
   const syncScript = '<script src="./supabase-sync.js"></script>';
   const auditScript = '<script src="./audit-log.js"></script>';
+  const reportsScript = '<script src="./reports-dashboard.js"></script>';
 
   // La instalación debe capturarse temprano, antes de que termine de cargar la página.
   if (!text.includes(installScript)) {
@@ -47,13 +49,14 @@ async function addAppScripts(response) {
     }
   }
 
-  // Auth se carga directamente desde index.html. Sincronización y trazabilidad
-  // se agregan al final del body, en ese orden, para envolver las funciones finales.
+  // Auth se carga directamente desde index.html. Los módulos complementarios
+  // se agregan al final del body respetando su orden de dependencia.
   const bodyCloseIndex = text.lastIndexOf('</body>');
   if (bodyCloseIndex >= 0) {
     let scripts='';
     if (!text.includes(syncScript)) scripts += syncScript + '\n';
     if (!text.includes(auditScript)) scripts += auditScript + '\n';
+    if (!text.includes(reportsScript)) scripts += reportsScript + '\n';
     if (scripts) {
       text = text.slice(0, bodyCloseIndex) + scripts + text.slice(bodyCloseIndex);
     }

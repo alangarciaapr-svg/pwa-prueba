@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v20';
+const CACHE_NAME = 'iaptidud-supervision-v21';
 const APP_SHELL = [
   './',
   './index.html',
@@ -9,6 +9,7 @@ const APP_SHELL = [
   './supabase-auth.js',
   './storage-manager.js',
   './video-evidence.js',
+  './video-pdf-compat.js',
   './supabase-sync.js',
   './audit-log.js',
   './reports-dashboard.js'
@@ -41,6 +42,7 @@ async function addAppScripts(response) {
   const installScript = '<script src="./install-helper.js"></script>';
   const storageScript = '<script src="./storage-manager.js"></script>';
   const videoScript = '<script src="./video-evidence.js"></script>';
+  const videoPdfScript = '<script src="./video-pdf-compat.js"></script>';
   const syncScript = '<script src="./supabase-sync.js"></script>';
   const auditScript = '<script src="./audit-log.js"></script>';
   const reportsScript = '<script src="./reports-dashboard.js"></script>';
@@ -60,6 +62,7 @@ async function addAppScripts(response) {
     let scripts='';
     if (!text.includes(storageScript)) scripts += storageScript + '\n';
     if (!text.includes(videoScript)) scripts += videoScript + '\n';
+    if (!text.includes(videoPdfScript)) scripts += videoPdfScript + '\n';
     if (!text.includes(syncScript)) scripts += syncScript + '\n';
     if (!text.includes(auditScript)) scripts += auditScript + '\n';
     if (!text.includes(reportsScript)) scripts += reportsScript + '\n';

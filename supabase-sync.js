@@ -1,5 +1,5 @@
 // Sincronización Supabase autenticada entre dispositivos.
-// Conserva el funcionamiento local/offline y aplica RLS por usuario autenticado.
+// Conserva el funcionamiento local/offline, aplica RLS y deriva archivos pesados a Storage.
 (function(){
   'use strict';
 
@@ -24,6 +24,7 @@
     const owner=(x&&Object.prototype.hasOwnProperty.call(x,'user_id'))
       ? x.user_id
       : authenticatedUserId();
+    const storage=window.IAPTIDUD_STORAGE;
 
     return {
       id:x.id,
@@ -37,15 +38,21 @@
       findings:Number(x.findings||0),
       evidence:Number(x.evidence||0),
       checklist:Array.isArray(x.checklist)?x.checklist:[],
-      finding_items:Array.isArray(x.findingItems)?x.findingItems:[],
-      evidence_items:Array.isArray(x.evidenceItems)?x.evidenceItems:[],
-      signature:x.signature||null,
+      finding_items:storage?.mediaItemsForDatabase
+        ? storage.mediaItemsForDatabase(x.findingItems)
+        : (Array.isArray(x.findingItems)?x.findingItems:[]),
+      evidence_items:storage?.mediaItemsForDatabase
+        ? storage.mediaItemsForDatabase(x.evidenceItems)
+        : (Array.isArray(x.evidenceItems)?x.evidenceItems:[]),
+      signature:storage?.signatureForDatabase
+        ? storage.signatureForDatabase(x)
+        : (x.signature||null),
       updated_at:new Date().toISOString()
     };
   }
 
   function fromSupabaseRow(row){
-    return {
+    const result={
       id:Number(row.id),
       user_id:row.user_id||null,
       type:row.type||'Seguridad',
@@ -58,9 +65,27 @@
       evidence:Number(row.evidence||0),
       checklist:Array.isArray(row.checklist)?row.checklist:[],
       findingItems:Array.isArray(row.finding_items)?row.finding_items:[],
-      evidenceItems:Array.isArray(row.evidence_items)?row.evidence_items:[],
-      signature:row.signature||undefined
+      evidenceItems:Array.isArray(row.evidence_items)?row.evidence_items:[]
     };
+
+    if(window.IAPTIDUD_STORAGE?.applySignatureFromDatabase){
+      window.IAPTIDUD_STORAGE.applySignatureFromDatabase(result,row.signature||null);
+    }else if(row.signature){
+      result.signature=row.signature;
+    }
+    return result;
+  }
+
+  async function prepareStorage(x){
+    if(!window.IAPTIDUD_STORAGE?.prepareInspection) return false;
+    try{
+      const changed=await window.IAPTIDUD_STORAGE.prepareInspection(x);
+      if(changed&&typeof persist==='function') persist();
+      return changed;
+    }catch(error){
+      console.warn('Storage pendiente para inspección:',x?.id,error);
+      return false;
+    }
   }
 
   async function syncInspection(x){
@@ -68,14 +93,14 @@
     const uid=authenticatedUserId();
     if(!uid) return false;
 
+    await prepareStorage(x);
+
     const hasOwner=Object.prototype.hasOwnProperty.call(x,'user_id');
     const isLegacy=hasOwner && x.user_id==null;
     if(!hasOwner) x.user_id=uid;
 
     let response;
 
-    // Los registros anteriores a Supabase Auth conservan user_id = NULL.
-    // El Superusuario puede actualizarlos sin convertirlos en registros propios.
     if(isLegacy && currentUser?.role==='Superusuario'){
       const patch=toSupabaseRow(x);
       delete patch.id;
@@ -145,11 +170,15 @@
       .filter(row=>!row.deleted_at)
       .map(fromSupabaseRow);
 
+    if(window.IAPTIDUD_STORAGE?.hydrateInspection){
+      await Promise.all(remote.map(x=>window.IAPTIDUD_STORAGE.hydrateInspection(x).catch(error=>{
+        console.warn('No se pudo hidratar Storage:',x?.id,error);
+        return x;
+      })));
+    }
+
     const uid=authenticatedUserId();
 
-    // Para usuarios normales, el historial local se mantiene limitado a sus registros.
-    // El Superusuario puede recibir registros de otros usuarios por RLS; esos registros
-    // conservan su user_id y nunca son reasignados al sincronizar.
     data=data.filter(x=>{
       if(Number(x.id)<=3) return false;
       if(x.user_id&&x.user_id!==uid&&currentUser?.role!=='Superusuario') return false;
@@ -187,8 +216,6 @@
     if(!uid) return false;
     if(typeof data==='undefined'||!Array.isArray(data)) return false;
 
-    // Desde Supabase Auth, toda inspección nueva recibe user_id al crearse,
-    // por lo que nunca reclamamos automáticamente registros históricos sin dueño.
     const candidates=data.filter(x=>
       Number(x.id)>3 &&
       x.user_id===uid
@@ -203,6 +230,32 @@
     }
     if(typeof persist==='function') persist();
     return true;
+  }
+
+  async function migrateMediaInLoadedInspections(){
+    if(!navigator.onLine||!window.IAPTIDUD_STORAGE?.prepareInspection) return false;
+    const uid=authenticatedUserId();
+    if(!uid||typeof data==='undefined'||!Array.isArray(data)) return false;
+    const superuser=currentUser?.role==='Superusuario';
+    let migrated=0;
+
+    for(const inspection of data){
+      if(!inspection||Number(inspection.id)<=3) continue;
+      if(!superuser&&inspection.user_id!==uid) continue;
+      try{
+        const changed=await window.IAPTIDUD_STORAGE.prepareInspection(inspection);
+        if(changed){
+          await syncInspection(inspection);
+          migrated++;
+        }
+      }catch(error){
+        console.warn('Migración de archivos pendiente:',inspection?.id,error);
+      }
+    }
+
+    if(migrated&&typeof persist==='function') persist();
+    if(migrated) console.info('Storage: inspecciones migradas:',migrated);
+    return migrated>0;
   }
 
   function currentInspection(){
@@ -359,6 +412,7 @@
     if(!navigator.onLine||!authenticatedUserId()) return false;
     try{
       await loadInspections();
+      await migrateMediaInLoadedInspections();
       await syncExistingLocalInspections();
       await loadInspections();
       return true;
@@ -378,6 +432,7 @@
     syncInspection,
     loadInspections,
     syncExistingLocalInspections,
+    migrateMedia:migrateMediaInLoadedInspections,
     deleteInspection:markInspectionDeleted,
     refresh:initialSync
   };

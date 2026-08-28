@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v19';
+const CACHE_NAME = 'iaptidud-supervision-v20';
 const APP_SHELL = [
   './',
   './index.html',
@@ -8,6 +8,7 @@ const APP_SHELL = [
   './install-helper.js',
   './supabase-auth.js',
   './storage-manager.js',
+  './video-evidence.js',
   './supabase-sync.js',
   './audit-log.js',
   './reports-dashboard.js'
@@ -27,7 +28,7 @@ self.addEventListener('activate', event => {
     await self.clients.claim();
 
     // Fuerza una recarga al activar esta versión para incorporar Auth,
-    // Storage, sincronización, trazabilidad y reportes actualizados.
+    // Storage, video, sincronización, trazabilidad y reportes actualizados.
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     await Promise.all(windows.map(client => client.navigate(client.url).catch(() => null)));
   })());
@@ -39,6 +40,7 @@ async function addAppScripts(response) {
   let text = await response.text();
   const installScript = '<script src="./install-helper.js"></script>';
   const storageScript = '<script src="./storage-manager.js"></script>';
+  const videoScript = '<script src="./video-evidence.js"></script>';
   const syncScript = '<script src="./supabase-sync.js"></script>';
   const auditScript = '<script src="./audit-log.js"></script>';
   const reportsScript = '<script src="./reports-dashboard.js"></script>';
@@ -52,11 +54,12 @@ async function addAppScripts(response) {
   }
 
   // Auth se carga directamente desde index.html. Los módulos complementarios
-  // se agregan al final del body respetando dependencias: Storage antes de Sync.
+  // se agregan al final del body respetando dependencias: Storage y Video antes de Sync.
   const bodyCloseIndex = text.lastIndexOf('</body>');
   if (bodyCloseIndex >= 0) {
     let scripts='';
     if (!text.includes(storageScript)) scripts += storageScript + '\n';
+    if (!text.includes(videoScript)) scripts += videoScript + '\n';
     if (!text.includes(syncScript)) scripts += syncScript + '\n';
     if (!text.includes(auditScript)) scripts += auditScript + '\n';
     if (!text.includes(reportsScript)) scripts += reportsScript + '\n';

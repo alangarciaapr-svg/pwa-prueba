@@ -1,5 +1,6 @@
 // Sincronización Supabase autenticada entre dispositivos.
 // Conserva el funcionamiento local/offline, aplica RLS y deriva archivos pesados a Storage.
+// v22: sincronización local-first para impedir que una descarga remota pise cambios offline pendientes.
 (function(){
   'use strict';
 
@@ -20,11 +21,41 @@
     return window.IAPTIDUD_AUTH?.getUserId?.()||currentUser?.id||null;
   }
 
+  function nowIso(){ return new Date().toISOString(); }
+  function timeValue(value){
+    const n=Date.parse(value||'');
+    return Number.isFinite(n)?n:0;
+  }
+
+  function markDirty(inspection,change='general'){
+    if(!inspection||typeof inspection!=='object') return;
+    inspection._sync_status='pending';
+    inspection._local_updated_at=nowIso();
+    const current=Array.isArray(inspection._pending_changes)?inspection._pending_changes:[];
+    if(change&&!current.includes(change)) current.push(change);
+    inspection._pending_changes=current;
+    if(typeof persist==='function') persist();
+  }
+
+  function markSynced(inspection,serverUpdatedAt){
+    if(!inspection||typeof inspection!=='object') return;
+    const stamp=serverUpdatedAt||inspection._local_updated_at||nowIso();
+    inspection._sync_status='synced';
+    inspection._server_updated_at=stamp;
+    inspection._local_updated_at=stamp;
+    inspection._pending_changes=[];
+  }
+
+  function isPending(inspection){
+    return inspection?._sync_status==='pending';
+  }
+
   function toSupabaseRow(x){
     const owner=(x&&Object.prototype.hasOwnProperty.call(x,'user_id'))
       ? x.user_id
       : authenticatedUserId();
     const storage=window.IAPTIDUD_STORAGE;
+    const updatedAt=x?._local_updated_at||nowIso();
 
     return {
       id:x.id,
@@ -47,11 +78,12 @@
       signature:storage?.signatureForDatabase
         ? storage.signatureForDatabase(x)
         : (x.signature||null),
-      updated_at:new Date().toISOString()
+      updated_at:updatedAt
     };
   }
 
   function fromSupabaseRow(row){
+    const stamp=row.updated_at||null;
     const result={
       id:Number(row.id),
       user_id:row.user_id||null,
@@ -65,7 +97,11 @@
       evidence:Number(row.evidence||0),
       checklist:Array.isArray(row.checklist)?row.checklist:[],
       findingItems:Array.isArray(row.finding_items)?row.finding_items:[],
-      evidenceItems:Array.isArray(row.evidence_items)?row.evidence_items:[]
+      evidenceItems:Array.isArray(row.evidence_items)?row.evidence_items:[],
+      _sync_status:'synced',
+      _server_updated_at:stamp,
+      _local_updated_at:stamp,
+      _pending_changes:[]
     };
 
     if(window.IAPTIDUD_STORAGE?.applySignatureFromDatabase){
@@ -74,6 +110,70 @@
       result.signature=row.signature;
     }
     return result;
+  }
+
+  async function fetchRemoteInspection(id){
+    const response=await fetch(
+      REST_URL+'/inspections?id=eq.'+encodeURIComponent(String(id))+'&select=*',
+      {method:'GET',headers:await headers(),cache:'no-store'}
+    );
+    if(!response.ok){
+      let detail='';
+      try{detail=await response.text()}catch(e){}
+      throw new Error('Supabase HTTP '+response.status+(detail?': '+detail:''));
+    }
+    const rows=await response.json();
+    return Array.isArray(rows)&&rows.length?rows[0]:null;
+  }
+
+  function unionItems(remoteItems,localItems){
+    const map=new Map();
+    (Array.isArray(remoteItems)?remoteItems:[]).forEach((item,index)=>{
+      const key=item?.id!=null?'id:'+String(item.id):'remote:'+index+':'+JSON.stringify(item);
+      map.set(key,item);
+    });
+    (Array.isArray(localItems)?localItems:[]).forEach((item,index)=>{
+      const key=item?.id!=null?'id:'+String(item.id):'local:'+index+':'+JSON.stringify(item);
+      map.set(key,item);
+    });
+    return [...map.values()];
+  }
+
+  function mergeConcurrent(local,remote){
+    if(!local) return remote;
+    if(!remote) return local;
+
+    const localTime=timeValue(local._local_updated_at);
+    const remoteTime=timeValue(remote._server_updated_at||remote._local_updated_at);
+    const localNewer=localTime>=remoteTime;
+    const preferred=localNewer?local:remote;
+    const secondary=localNewer?remote:local;
+
+    const merged={...secondary,...preferred};
+
+    merged.findingItems=unionItems(remote.findingItems,local.findingItems);
+    merged.evidenceItems=unionItems(remote.evidenceItems,local.evidenceItems);
+    if(merged.findingItems.length) merged.findings=merged.findingItems.length;
+    else merged.findings=Math.max(Number(local.findings||0),Number(remote.findings||0));
+    if(merged.evidenceItems.length) merged.evidence=merged.evidenceItems.length;
+    else merged.evidence=Math.max(Number(local.evidence||0),Number(remote.evidence||0));
+
+    merged.checklist=Array.isArray(preferred.checklist)?preferred.checklist:(Array.isArray(secondary.checklist)?secondary.checklist:[]);
+    if(!merged.signature){
+      merged.signature=local.signature||remote.signature||null;
+      merged.signature_path=local.signature_path||remote.signature_path||null;
+    }
+
+    merged._sync_status='pending';
+    merged._local_updated_at=nowIso();
+    merged._server_updated_at=remote._server_updated_at||remote._local_updated_at||null;
+    merged._pending_changes=[...new Set([
+      ...(Array.isArray(local._pending_changes)?local._pending_changes:[]),
+      'conflict_merge'
+    ])];
+
+    if(typeof updateInspectionStatus==='function') updateInspectionStatus(merged);
+    return merged;
   }
 
   async function prepareStorage(x){
@@ -88,16 +188,34 @@
     }
   }
 
-  async function syncInspection(x){
+  async function syncInspection(x,options={}){
     if(!navigator.onLine||!x) return false;
     const uid=authenticatedUserId();
     if(!uid) return false;
 
+    const wasPending=isPending(x);
     await prepareStorage(x);
 
     const hasOwner=Object.prototype.hasOwnProperty.call(x,'user_id');
     const isLegacy=hasOwner && x.user_id==null;
     if(!hasOwner) x.user_id=uid;
+
+    if(!x._local_updated_at) x._local_updated_at=nowIso();
+
+    if(wasPending&&!isLegacy&&!options.skipConflictCheck){
+      const remoteRow=await fetchRemoteInspection(x.id);
+      if(remoteRow&&!remoteRow.deleted_at){
+        const remote=fromSupabaseRow(remoteRow);
+        const baseline=timeValue(x._server_updated_at);
+        const remoteStamp=timeValue(remoteRow.updated_at);
+        if(baseline&&remoteStamp>baseline){
+          const merged=mergeConcurrent(x,remote);
+          Object.keys(x).forEach(key=>delete x[key]);
+          Object.assign(x,merged);
+          if(typeof persist==='function') persist();
+        }
+      }
+    }
 
     let response;
 
@@ -133,9 +251,19 @@
     if(!response.ok){
       let detail='';
       try{detail=await response.text()}catch(e){}
+      x._sync_status='pending';
+      if(typeof persist==='function') persist();
       throw new Error('Supabase HTTP '+response.status+(detail?': '+detail:''));
     }
 
+    let returned=[];
+    try{returned=await response.json()}catch(e){}
+    const serverUpdatedAt=Array.isArray(returned)&&returned[0]?.updated_at
+      ? returned[0].updated_at
+      : x._local_updated_at;
+
+    markSynced(x,serverUpdatedAt);
+    if(typeof persist==='function') persist();
     return true;
   }
 
@@ -190,7 +318,17 @@
       const key=String(remoteInspection.id);
       const local=localById.get(key);
       if(local){
-        Object.assign(local,remoteInspection);
+        if(isPending(local)){
+          const remoteTime=timeValue(remoteInspection._server_updated_at);
+          const baseline=timeValue(local._server_updated_at);
+          if(baseline&&remoteTime>baseline){
+            const merged=mergeConcurrent(local,remoteInspection);
+            Object.keys(local).forEach(k=>delete local[k]);
+            Object.assign(local,merged);
+          }
+        }else{
+          Object.assign(local,remoteInspection);
+        }
       }else{
         data.push(remoteInspection);
         localById.set(key,remoteInspection);
@@ -210,6 +348,29 @@
     return true;
   }
 
+  async function syncPendingLocalInspections(){
+    if(!navigator.onLine) return false;
+    const uid=authenticatedUserId();
+    if(!uid||typeof data==='undefined'||!Array.isArray(data)) return false;
+
+    const superuser=currentUser?.role==='Superusuario';
+    const candidates=data.filter(x=>
+      Number(x.id)>3 &&
+      isPending(x) &&
+      (x.user_id===uid || (superuser&&x.user_id))
+    );
+
+    for(const inspection of candidates){
+      try{
+        await syncInspection(inspection);
+      }catch(error){
+        console.warn('Cambio local pendiente; se conserva en el dispositivo:',inspection?.id,error);
+      }
+    }
+    if(typeof persist==='function') persist();
+    return true;
+  }
+
   async function syncExistingLocalInspections(){
     if(!navigator.onLine) return false;
     const uid=authenticatedUserId();
@@ -218,11 +379,13 @@
 
     const candidates=data.filter(x=>
       Number(x.id)>3 &&
-      x.user_id===uid
+      x.user_id===uid &&
+      !x._server_updated_at
     );
 
     for(const inspection of candidates){
       try{
+        if(!isPending(inspection)) markDirty(inspection,'initial_upload');
         await syncInspection(inspection);
       }catch(error){
         console.warn('No se pudo subir inspección local pendiente:',inspection?.id,error);
@@ -245,6 +408,7 @@
       try{
         const changed=await window.IAPTIDUD_STORAGE.prepareInspection(inspection);
         if(changed){
+          markDirty(inspection,'storage_migration');
           await syncInspection(inspection);
           migrated++;
         }
@@ -275,9 +439,9 @@
     if(!x) throw new Error('Inspección no encontrada');
     if(!authenticatedUserId()) throw new Error('Sesión no autenticada');
 
-    await syncInspection(x);
+    if(isPending(x)) await syncInspection(x);
 
-    const stamp=new Date().toISOString();
+    const stamp=nowIso();
     const response=await fetch(
       REST_URL+'/inspections?id=eq.'+encodeURIComponent(String(x.id)),
       {
@@ -352,6 +516,14 @@
     };
   }
 
+  const mutationChangeMap={
+    toggleItem:'checklist',
+    saveFinding:'finding',
+    saveEvidence:'evidence',
+    saveSign:'signature',
+    clearSign:'signature'
+  };
+
   function wrapMutation(name){
     const original=window[name];
     if(typeof original!=='function') return;
@@ -359,11 +531,15 @@
       const result=original.apply(this,arguments);
       Promise.resolve(result).then(async()=>{
         const inspection=currentInspection();
-        if(!inspection||!navigator.onLine||!authenticatedUserId()) return;
+        if(!inspection) return;
+
+        markDirty(inspection,mutationChangeMap[name]||name);
+
+        if(!navigator.onLine||!authenticatedUserId()) return;
         try{
           await syncInspection(inspection);
         }catch(error){
-          console.warn('No se pudo actualizar inspección en Supabase:',inspection.id,error);
+          console.warn('No se pudo actualizar inspección en Supabase; cambio local preservado:',inspection.id,error);
         }
       });
       return result;
@@ -385,7 +561,8 @@
         const created=data.find(x=>!idsBefore.has(x.id));
         if(!created) return;
         if(!created.user_id) created.user_id=authenticatedUserId();
-        if(typeof persist==='function') persist();
+
+        markDirty(created,'created');
 
         if(!navigator.onLine){
           if(typeof toast==='function') toast('Inspección guardada localmente. Se sincronizará al volver Internet');
@@ -411,9 +588,11 @@
     await window.IAPTIDUD_AUTH?.ready?.();
     if(!navigator.onLine||!authenticatedUserId()) return false;
     try{
+      await syncPendingLocalInspections();
+      await syncExistingLocalInspections();
       await loadInspections();
       await migrateMediaInLoadedInspections();
-      await syncExistingLocalInspections();
+      await syncPendingLocalInspections();
       await loadInspections();
       return true;
     }catch(error){
@@ -432,6 +611,8 @@
     syncInspection,
     loadInspections,
     syncExistingLocalInspections,
+    syncPendingLocalInspections,
+    markDirty,
     migrateMedia:migrateMediaInLoadedInspections,
     deleteInspection:markInspectionDeleted,
     refresh:initialSync

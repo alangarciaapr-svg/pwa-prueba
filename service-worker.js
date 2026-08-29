@@ -1,4 +1,4 @@
-const CACHE_NAME = 'iaptidud-supervision-v21';
+const CACHE_NAME = 'iaptidud-supervision-v22';
 const APP_SHELL = [
   './',
   './index.html',
@@ -29,7 +29,7 @@ self.addEventListener('activate', event => {
     await self.clients.claim();
 
     // Fuerza una recarga al activar esta versión para incorporar Auth,
-    // Storage, video, sincronización, trazabilidad y reportes actualizados.
+    // Storage, video, sincronización local-first, trazabilidad y reportes actualizados.
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     await Promise.all(windows.map(client => client.navigate(client.url).catch(() => null)));
   })());

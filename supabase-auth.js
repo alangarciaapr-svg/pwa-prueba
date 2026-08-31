@@ -1,9 +1,11 @@
 // Autenticación Supabase Auth para Iaptidud supervision.
 // Usa únicamente la URL y la clave pública anon ya presentes en index.html.
+// v23: permite restaurar una sesión previamente validada cuando la PWA abre sin Internet.
 (function(){
   'use strict';
 
   const SESSION_KEY='iaptidud-supabase-auth-session-v1';
+  const OFFLINE_USER_KEY='iaptidud-authenticated-user-cache-v1';
   let authSession=null;
   let currentStorageKey=null;
   let readyResolve;
@@ -31,6 +33,28 @@
     }
   }
 
+  function saveOfflineUser(user){
+    if(user?.id){
+      localStorage.setItem(OFFLINE_USER_KEY,JSON.stringify({
+        id:user.id,
+        email:user.email||'',
+        name:user.name||'',
+        role:user.role||'Usuario'
+      }));
+    }else{
+      localStorage.removeItem(OFFLINE_USER_KEY);
+    }
+  }
+
+  function readOfflineUser(){
+    try{
+      const cached=JSON.parse(localStorage.getItem(OFFLINE_USER_KEY)||'null');
+      return cached?.id?cached:null;
+    }catch(e){
+      return null;
+    }
+  }
+
   function sessionExpirySeconds(session){
     if(!session) return 0;
     if(session.expires_at) return Number(session.expires_at)||0;
@@ -40,6 +64,7 @@
 
   async function refreshSession(){
     if(!authSession?.refresh_token) return null;
+    if(!navigator.onLine) return authSession;
 
     const response=await fetch(SUPABASE_URL+'/auth/v1/token?grant_type=refresh_token',{
       method:'POST',
@@ -50,6 +75,7 @@
 
     if(!response.ok){
       saveSession(null);
+      saveOfflineUser(null);
       return null;
     }
 
@@ -65,6 +91,10 @@
     }
     if(!authSession?.access_token) return null;
 
+    // Offline no se intenta refrescar ni invalidar una sesión previamente válida.
+    // El token solo se usa localmente hasta recuperar conexión.
+    if(!navigator.onLine) return authSession;
+
     const expiry=sessionExpirySeconds(authSession);
     if(expiry && expiry-Math.floor(Date.now()/1000)<90){
       return await refreshSession();
@@ -78,6 +108,8 @@
   }
 
   async function getVerifiedUser(){
+    if(!navigator.onLine) return authSession?.user||null;
+
     let session=await getSession();
     if(!session?.access_token) return null;
 
@@ -173,6 +205,25 @@
     localStorage.removeItem('iaptidud-current-user');
   }
 
+  function applyOfflineAuthenticatedUser(cachedUser){
+    if(!cachedUser?.id||!authSession?.access_token) return false;
+    const sessionUserId=authSession?.user?.id||null;
+    if(sessionUserId&&String(sessionUserId)!==String(cachedUser.id)) return false;
+
+    currentUser={
+      id:cachedUser.id,
+      email:cachedUser.email||authSession?.user?.email||'',
+      name:cachedUser.name||String(cachedUser.email||authSession?.user?.email||'Usuario').split('@')[0],
+      role:cachedUser.role||'Usuario'
+    };
+
+    installPerUserPersistence(currentUser.id);
+    showPrivateNavigation();
+    updateAuthenticatedUI();
+    window.dispatchEvent(new CustomEvent('iaptidud-auth-changed',{detail:{authenticated:true,user:currentUser,offline:true}}));
+    return true;
+  }
+
   async function applyAuthenticatedUser(user){
     const session=await getSession();
     if(!session?.access_token) return false;
@@ -186,6 +237,7 @@
     };
 
     localStorage.setItem('iaptidud-current-user',JSON.stringify(currentUser));
+    saveOfflineUser(currentUser);
     installPerUserPersistence(user.id);
     showPrivateNavigation();
     updateAuthenticatedUI();
@@ -201,6 +253,7 @@
     data=[];
     if(typeof currentId!=='undefined') currentId=null;
     localStorage.removeItem(SESSION_KEY);
+    saveOfflineUser(null);
     clearLegacyDemoSession();
     hidePrivateNavigation();
     try{go('login')}catch(e){}
@@ -220,7 +273,7 @@
       return false;
     }
     if(!navigator.onLine){
-      if(typeof toast==='function') toast('Necesitas conexión para iniciar sesión');
+      if(typeof toast==='function') toast('Necesitas conexión para iniciar sesión por primera vez');
       return false;
     }
 
@@ -278,6 +331,7 @@
       console.warn('Supabase logout incompleto:',error);
     }finally{
       saveSession(null);
+      saveOfflineUser(null);
       applyLoggedOutState();
       window.dispatchEvent(new CustomEvent('iaptidud-auth-changed',{detail:{authenticated:false,user:null}}));
       if(typeof toast==='function') toast('Sesión cerrada');
@@ -288,7 +342,19 @@
     clearLegacyDemoSession();
     try{authSession=JSON.parse(localStorage.getItem(SESSION_KEY)||'null')}catch(e){authSession=null}
 
-    if(!authSession){
+    if(!authSession?.access_token){
+      applyLoggedOutState();
+      return false;
+    }
+
+    // Si no hay Internet, solo se permite entrar cuando esta instalación ya
+    // conserva una sesión Supabase y un perfil previamente validados online.
+    if(!navigator.onLine){
+      const cachedUser=readOfflineUser();
+      if(cachedUser&&applyOfflineAuthenticatedUser(cachedUser)){
+        try{go('home')}catch(e){}
+        return true;
+      }
       applyLoggedOutState();
       return false;
     }
@@ -297,6 +363,7 @@
       const user=await getVerifiedUser();
       if(!user){
         saveSession(null);
+        saveOfflineUser(null);
         applyLoggedOutState();
         return false;
       }
@@ -305,8 +372,32 @@
       return true;
     }catch(error){
       console.warn('No se pudo restaurar la sesión Supabase:',error);
+      // Un fallo transitorio de red no destruye una sesión previamente validada.
+      const cachedUser=readOfflineUser();
+      if(!navigator.onLine&&cachedUser&&applyOfflineAuthenticatedUser(cachedUser)){
+        try{go('home')}catch(e){}
+        return true;
+      }
       applyLoggedOutState();
       return false;
+    }
+  }
+
+  async function revalidateWhenOnline(){
+    if(!navigator.onLine||!authSession?.access_token||!currentUser?.id) return;
+    try{
+      const user=await getVerifiedUser();
+      if(!user){
+        applyLoggedOutState();
+        window.dispatchEvent(new CustomEvent('iaptidud-auth-changed',{detail:{authenticated:false,user:null}}));
+        return;
+      }
+      await applyAuthenticatedUser(user);
+      if(window.IAPTIDUD_SUPABASE_SYNC?.refresh){
+        await window.IAPTIDUD_SUPABASE_SYNC.refresh();
+      }
+    }catch(error){
+      console.warn('Revalidación de sesión pendiente:',error);
     }
   }
 
@@ -355,8 +446,10 @@
     refreshSession
   };
 
+  window.addEventListener('online',()=>setTimeout(revalidateWhenOnline,250));
+
   restoreSession().finally(()=>{
     readyResolve(true);
-    window.dispatchEvent(new CustomEvent('iaptidud-auth-ready',{detail:{authenticated:Boolean(currentUser?.id),user:currentUser}}));
+    window.dispatchEvent(new CustomEvent('iaptidud-auth-ready',{detail:{authenticated:Boolean(currentUser?.id),user:currentUser,offline:!navigator.onLine}}));
   });
 })();
